@@ -7,11 +7,7 @@ import java.util.List;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
-import com.citusdata.migration.datamodel.PrimaryKeyValue;
-import com.citusdata.migration.datamodel.TableColumn;
-import com.citusdata.migration.datamodel.TableEmitter;
-import com.citusdata.migration.datamodel.TableRow;
-import com.citusdata.migration.datamodel.TableSchema;
+import com.citusdata.migration.datamodel.*;
 
 /*
  * HashedMultiEmitter can be used to perform concurrent writes across a pool of
@@ -76,15 +72,17 @@ public class HashedMultiEmitter implements TableEmitter {
 
 	@Override
 	public long copyFromReader(TableSchema tableSchema, Reader reader) {
-		lock.writeLock().lock();
-
-		try {
-			TableEmitter emitter = emitters.get(0);
-
-			return emitter.copyFromReader(tableSchema, reader);
-		} finally {
-			lock.writeLock().unlock();
+		int index = 0;
+		if(reader instanceof TableRowBatch.ShardableStringReader){
+			index = Math.abs(((TableRowBatch.ShardableStringReader) reader).getShard());
+			if(index > emitters.size()){
+				index = index % emitters.size();
+			}
 		}
+
+		TableEmitter emitter = emitters.get(index);
+
+		return emitter.copyFromReader(tableSchema, reader);
 	}
 
 	@Override

@@ -3,6 +3,7 @@
  */
 package com.citusdata.migration;
 
+import java.io.Reader;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
@@ -14,6 +15,9 @@ import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import com.amazonaws.auth.AWSCredentialsProvider;
 import com.amazonaws.services.cloudwatch.AmazonCloudWatch;
@@ -255,7 +259,10 @@ public class DynamoDBTableReplicator {
 			numRowsReplicated += tableRowBatch.size();
 
 			/* load the batch using COPY */
-			emitter.copyFromReader(tableSchema, tableRowBatch.asCopyReader());
+
+			final Reader reader = tableRowBatch.asCopyReader(partition);
+
+			emitter.copyFromReader(tableSchema, reader);
 
 			lastEvaluatedScanKey = scanResult.getLastEvaluatedKey();
 
@@ -455,33 +462,52 @@ public class DynamoDBTableReplicator {
 		log.info("Replicated {} changes to table {}", records.size(), tableSchema.tableName);
 	}
 
+	final static ReadWriteLock lock = new ReentrantReadWriteLock();
 	void addNewColumns(Map<String,AttributeValue> item) {
 		if(conversionMode == ConversionMode.jsonb) {
 			/* don't add new columns in jsonb mode */
 			return;
 		}
 
-		for(Map.Entry<String,AttributeValue> entry : item.entrySet()) {
-			String keyName = entry.getKey();
-			String columnName = dynamoKeyToColumnName(keyName);
-			TableColumn column = tableSchema.getColumn(columnName);
-			TableColumnType valueType = DynamoDBTableReplicator.columnTypeFromDynamoValue(entry.getValue());
+		final Lock readLock = lock.readLock();
+		final Lock writeLock = lock.writeLock();
 
-			if (column == null) {
-				column = tableSchema.addColumn(columnName, valueType);
-				log.info("Adding new column to table {}: {}", tableSchema.tableName, column);
-				emitter.createColumn(column);
-			} else if (column.type != valueType) {
-				columnName = columnName + "_" + valueType;
-				column = tableSchema.getColumn(columnName);
+		try {
+			readLock.lock();
+			for (Map.Entry<String, AttributeValue> entry : item.entrySet()) {
+				String keyName = entry.getKey();
+				String columnName = dynamoKeyToColumnName(keyName);
+				TableColumn column = tableSchema.getColumn(columnName);
+				TableColumnType valueType = DynamoDBTableReplicator.columnTypeFromDynamoValue(entry.getValue());
 
-				if (column == null) {
-					column = tableSchema.addColumn(columnName, valueType);
-					log.info("Adding new column to table {}: {}", tableSchema.tableName, column);
-					emitter.createColumn(column);
+				if (column == null || column.type != valueType) {
+					writeLock.lock();
+					try {
+						column = tableSchema.getColumn(columnName);
+						valueType = DynamoDBTableReplicator.columnTypeFromDynamoValue(entry.getValue());
+						if (column == null) {
+							column = tableSchema.addColumn(columnName, valueType);
+							log.info("Adding new column to table {}: {}", tableSchema.tableName, column);
+							emitter.createColumn(column);
+						} else if (column.type != valueType) {
+							columnName = columnName + "_" + valueType;
+							column = tableSchema.getColumn(columnName);
+
+							if (column == null) {
+								column = tableSchema.addColumn(columnName, valueType);
+								log.info("Adding new column to table {}: {}", tableSchema.tableName, column);
+								emitter.createColumn(column);
+							}
+						}
+					}finally{
+						writeLock.unlock();
+					}
 				}
 			}
+		}finally{
+			readLock.unlock();
 		}
+
 	}
 
 	PrimaryKeyValue primaryKeyValueFromDynamoKeys(Map<String,AttributeValue> dynamoKeys) {

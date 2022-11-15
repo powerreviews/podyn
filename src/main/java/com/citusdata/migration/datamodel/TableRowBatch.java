@@ -34,13 +34,29 @@ public class TableRowBatch {
 		
 		return sb.toString();
 	}
-	
+
+	public Reader asCopyReader(int shard) {
+		return new ShardableStringReader(toCopyInput(), shard);
+	}
+
 	public Reader asCopyReader() {
 		return new StringReader(toCopyInput());
 	}
 
 	public long size() {
 		return tableRows.size();
+	}
+
+
+	public class ShardableStringReader extends StringReader {
+		private final int shard;
+		public ShardableStringReader(String s, int shard) {
+			super(s);
+			this.shard = shard;
+		}
+		public int getShard(){
+			return this.shard;
+		}
 	}
 
 }
